@@ -10,9 +10,12 @@ extern crate alloc;
 mod gdt;
 mod heap;
 mod idt;
+mod keyboard;
 mod memory;
 mod paging;
 mod pic;
+mod shell;
+mod vga;
 
 use core::panic::PanicInfo;
 use core::arch::global_asm;
@@ -132,6 +135,19 @@ mod serial {
         SERIAL1.lock().init();
     }
 
+    /// Non-blocking read of one byte from COM1.
+    pub fn try_read() -> Option<u8> {
+        use x86_64::instructions::port::Port;
+        let _guard = SERIAL1.lock(); // don't interleave with a writer
+        unsafe {
+            if Port::<u8>::new(0x3F8 + 5).read() & 1 != 0 {
+                Some(Port::<u8>::new(0x3F8).read())
+            } else {
+                None
+            }
+        }
+    }
+
     #[doc(hidden)]
     pub fn _print(args: fmt::Arguments) {
         use core::fmt::Write;
@@ -203,16 +219,21 @@ pub extern "C" fn _start(mb_info: usize) -> ! {
     serial_println!("[ok] timer IRQ: {} ticks received (~1 second)", pic::ticks());
 
     serial_println!("");
-    serial_println!("Spatial OS is ALIVE! (press keys in the QEMU window to see scancodes)");
+    serial_println!("Spatial OS is ALIVE!");
 
-    let mut seen_keys = 0;
+    let mut shell = shell::Shell::new();
+    let mut decoder = keyboard::Decoder::new();
+    shell.start();
     loop {
-        x86_64::instructions::hlt();
-        let n = pic::key_count();
-        if n != seen_keys {
-            seen_keys = n;
-            serial_println!("key scancode: {:#04x}", pic::last_scancode());
+        while let Some(sc) = keyboard::pop() {
+            if let Some(c) = decoder.feed(sc) {
+                shell.input(c);
+            }
         }
+        while let Some(b) = serial::try_read() {
+            shell.input(if b == b'\r' { '\n' } else { b as char });
+        }
+        x86_64::instructions::hlt();
     }
 }
 

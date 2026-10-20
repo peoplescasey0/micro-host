@@ -81,6 +81,7 @@ pub fn on_timer() {
 
 pub fn on_keyboard() {
     let sc = unsafe { Port::<u8>::new(0x60).read() };
+    crate::keyboard::push(sc);
     LAST_SCANCODE.store(sc, Ordering::Relaxed);
     KEY_COUNT.fetch_add(1, Ordering::Relaxed);
 }

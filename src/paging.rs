@@ -21,6 +21,7 @@ struct Frames {
     next: u64,
     free: Vec<u64>,
     allocated: usize,
+    total: usize,
 }
 
 static FRAMES: Mutex<Option<Frames>> = Mutex::new(None);
@@ -52,8 +53,14 @@ pub unsafe fn init_frames(floor: u64) -> usize {
         next,
         free: Vec::new(),
         allocated: 0,
+        total,
     });
     total
+}
+
+/// Total frames the allocator manages.
+pub fn frames_total() -> usize {
+    FRAMES.lock().as_ref().map_or(0, |f| f.total)
 }
 
 /// Number of frames currently handed out.
