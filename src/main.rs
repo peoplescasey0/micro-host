@@ -14,6 +14,7 @@ mod keyboard;
 mod memory;
 mod paging;
 mod pic;
+mod sched;
 mod shell;
 mod vga;
 
@@ -221,6 +222,9 @@ pub extern "C" fn _start(mb_info: usize) -> ! {
     serial_println!("");
     serial_println!("Spatial OS is ALIVE!");
 
+    sched::init("shell");
+    sched_selftest();
+
     let mut shell = shell::Shell::new();
     let mut decoder = keyboard::Decoder::new();
     shell.start();
@@ -233,8 +237,44 @@ pub extern "C" fn _start(mb_info: usize) -> ! {
         while let Some(b) = serial::try_read() {
             shell.input(if b == b'\r' { '\n' } else { b as char });
         }
+        sched::yield_now();
         x86_64::instructions::hlt();
     }
+}
+
+fn sched_selftest() {
+    use spin::Mutex;
+    static LOG: Mutex<alloc::string::String> = Mutex::new(alloc::string::String::new());
+    static WOKE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+    // Two tasks alternating via yield_now must interleave strictly.
+    for (name, ch) in [("A", 'A'), ("B", 'B')] {
+        sched::spawn(name, move || {
+            for _ in 0..3 {
+                LOG.lock().push(ch);
+                sched::yield_now();
+            }
+        });
+    }
+    while sched::live_tasks() > 1 {
+        sched::yield_now();
+    }
+    assert_eq!(LOG.lock().as_str(), "ABABAB", "yield order");
+    serial_println!("[ok] scheduler: 2 tasks interleaved via yield ({})", LOG.lock().as_str());
+
+    // A sleeping task must wake no earlier than requested while others run.
+    let t0 = pic::ticks();
+    sched::spawn("sleeper", || {
+        sched::sleep(50);
+        WOKE.store(pic::ticks(), core::sync::atomic::Ordering::SeqCst);
+    });
+    while sched::live_tasks() > 1 {
+        sched::yield_now();
+        x86_64::instructions::hlt();
+    }
+    let dt = WOKE.load(core::sync::atomic::Ordering::SeqCst) - t0;
+    assert!(dt >= 50 && dt < 70, "sleep took {} ticks", dt);
+    serial_println!("[ok] scheduler: sleep(50) woke after {} ticks, task exited and was reaped", dt);
 }
 
 fn remap_check() {

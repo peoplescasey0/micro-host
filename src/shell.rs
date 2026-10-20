@@ -1,7 +1,7 @@
 //! Minimal interactive shell. Input comes from the PS/2 keyboard and COM1;
 //! output goes to the VGA console and COM1.
 
-use crate::{paging, pic, vga};
+use crate::{paging, pic, sched, vga};
 use alloc::string::String;
 use core::fmt;
 
@@ -80,6 +80,8 @@ fn run(line: &str) {
             kprintln!("clear           clear the screen");
             kprintln!("uptime          time since timer start");
             kprintln!("mem             frame allocator usage");
+            kprintln!("ps              list tasks");
+            kprintln!("spawn           start a demo task (3 ticks, 1 s apart)");
             kprintln!("reboot          reset the machine");
             kprintln!("halt            stop the CPU");
         }
@@ -93,6 +95,16 @@ fn run(line: &str) {
             let used = paging::frames_in_use();
             let total = paging::frames_total();
             kprintln!("frames: {} used / {} total ({} KiB used)", used, total, used * 4);
+        }
+        "ps" => sched::for_each(|id, name, state| kprintln!("{:>3}  {:<10} {}", id, name, state)),
+        "spawn" => {
+            let id = sched::spawn("demo", || {
+                for i in 1..=3 {
+                    sched::sleep(100);
+                    kprintln!("[demo] tick {}", i);
+                }
+            });
+            kprintln!("spawned task {}", id);
         }
         "reboot" => unsafe {
             // Pulse the CPU reset line through the keyboard controller.
