@@ -26,10 +26,12 @@ SECTIONS
         *(.rodata.*)
     }
 
-    /* Initialized data */
+    /* Initialized data (and GOT: some calls, e.g. memcpy, go through GOT slots) */
     .data : ALIGN(4K) {
         *(.data)
         *(.data.*)
+        *(.got)
+        *(.got.plt)
     }
 
     /* Uninitialized data */
@@ -45,8 +47,6 @@ SECTIONS
         *(.eh_frame_hdr)
         *(.note.*)
         *(.comment)
-        *(.got)
-        *(.got.plt)
     }
 
     kernel_end = .;

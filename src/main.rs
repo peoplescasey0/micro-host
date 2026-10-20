@@ -3,6 +3,14 @@
 
 #![no_std]
 #![no_main]
+#![feature(abi_x86_interrupt)]
+
+extern crate alloc;
+
+mod gdt;
+mod heap;
+mod idt;
+mod memory;
 
 use core::panic::PanicInfo;
 use core::arch::global_asm;
@@ -77,6 +85,8 @@ global_asm!(
     "   lea rsp, [rip + boot_stack_top]",
     "   and rsp, -16",
     "   xor rbp, rbp",
+    // EBX still holds the multiboot2 info pointer from GRUB; pass it as arg 1.
+    "   mov edi, ebx",
     "   call _start",
     "1: hlt",
     "   jmp 1b",
@@ -102,7 +112,7 @@ global_asm!(
     "   .skip 4096",
     ".align 16",
     "boot_stack:",
-    "   .skip 16384",
+    "   .skip 65536",
     "boot_stack_top:",
 );
 // Minimal serial implementation
@@ -140,29 +150,59 @@ mod serial {
 
 // Entry point - called from the 32-bit stub above
 #[no_mangle]
-pub extern "C" fn _start() -> ! {
+pub extern "C" fn _start(mb_info: usize) -> ! {
     serial::init();
 
     serial_println!("POST CARD SPATIAL OS - BOOTED!");
     serial_println!("================================");
+    serial_println!("Kernel: multiboot2 via GRUB, 64-bit long mode");
     serial_println!("");
-    serial_println!("Kernel: multiboot2 via GRUB");
-    serial_println!("Status: Running in 64-bit mode");
-    serial_println!("");
-    serial_println!("POST CARD SPATIAL OS:");
-    serial_println!("  Universal spatial computing");
-    serial_println!("  Windows + Linux + Android in 3D");
-    serial_println!("  Paper airplane sharing");
-    serial_println!("");
-    serial_println!("Bootloader fix: COMPLETE");
-    serial_println!("ISO creation:   COMPLETE");
-    serial_println!("Next step:      QEMU integration");
+
+    gdt::init();
+    serial_println!("[ok] GDT + TSS loaded");
+    idt::init();
+    serial_println!("[ok] IDT loaded");
+
+    // Prove exceptions work: breakpoint must be handled and execution resume.
+    x86_64::instructions::interrupts::int3();
+    serial_println!("[ok] breakpoint exception handled, execution resumed");
+
+    serial_println!("[..] multiboot2 info at {:#x}", mb_info);
+    serial_println!("[..] kernel image ends at {:#x}", memory::kernel_end_addr());
+    let total = unsafe { memory::report(mb_info) };
+    serial_println!("[ok] {} MiB usable RAM", total / (1024 * 1024));
+
+    match unsafe { heap::init(mb_info) } {
+        Some((start, size)) => {
+            serial_println!("[ok] heap: {:#x}, {} KiB", start, size / 1024);
+            heap_selftest();
+        }
+        None => serial_println!("[!!] no suitable region for heap"),
+    }
+
     serial_println!("");
     serial_println!("Spatial OS is ALIVE!");
 
     loop {
-        core::hint::spin_loop();
+        x86_64::instructions::hlt();
     }
+}
+
+fn heap_selftest() {
+    use alloc::{boxed::Box, string::String, vec::Vec};
+
+    let boxed = Box::new(0xC0FFEEu32);
+    let mut v: Vec<u64> = Vec::new();
+    for i in 0..1000 {
+        v.push(i * i);
+    }
+    let sum: u64 = v.iter().sum();
+    let mut s = String::from("heap");
+    s.push_str(" works");
+
+    assert_eq!(*boxed, 0xC0FFEE);
+    assert_eq!(sum, 332_833_500);
+    serial_println!("[ok] heap selftest: Box, Vec(1000, sum={}), String(\"{}\")", sum, s);
 }
 
 #[panic_handler]

@@ -1,109 +1,91 @@
-use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
-use x86_64::{
-    structures::paging::{FrameAllocator, PhysFrame, Size4KiB},
-    PhysAddr,
-};
+//! Multiboot2 memory map parsing.
+//!
+//! The boot stub identity-maps the first 1 GiB, so physical addresses below
+//! that limit can be dereferenced directly.
 
-pub struct BootInfoFrameAllocator {
-    memory_map: &'static MemoryMap,
-    next: usize,
+use crate::serial_println;
+
+pub const IDENTITY_LIMIT: u64 = 1 << 30;
+
+const TAG_END: u32 = 0;
+const TAG_MMAP: u32 = 6;
+const MMAP_AVAILABLE: u32 = 1;
+
+extern "C" {
+    static kernel_end: u8;
 }
 
-impl BootInfoFrameAllocator {
-    pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
-        BootInfoFrameAllocator { memory_map, next: 0 }
-    }
-
-    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
-        let regions = self.memory_map.iter();
-        let usable = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
-        let addr_ranges = usable.map(|r| r.range.start_addr()..r.range.end_addr());
-        let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
-        frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
-    }
+#[derive(Clone, Copy)]
+pub struct Region {
+    pub base: u64,
+    pub len: u64,
 }
 
-unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
-    fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        let frame = self.usable_frames().nth(self.next);
-        self.next += 1;
-        frame
+impl Region {
+    pub fn end(&self) -> u64 {
+        self.base + self.len
     }
 }
 
+pub fn align_up(addr: u64, align: u64) -> u64 {
+    (addr + align - 1) & !(align - 1)
+}
 
-// Paging implementation for x86_64
-use x86_64::{
-    structures::paging::{
-        PageTable, OffsetPageTable, PageTableIndex, Page,
-        PageTableFlags as Flags, Mapper, Size4KiB, FrameAllocator,
-        mapper::MapToError, PageTable as PageTableStruct,
-    },
-    VirtAddr, PhysAddr,
-};
+pub fn kernel_end_addr() -> u64 {
+    core::ptr::addr_of!(kernel_end) as u64
+}
 
-/// Initialize a new OffsetPageTable for kernel memory mapping
+/// End address of the multiboot2 info structure.
 ///
 /// # Safety
-/// This function is unsafe because the caller must guarantee that the
-/// complete physical memory is mapped to virtual memory at the passed
-/// `physical_memory_offset`. Also, this function must be called only once
-/// to avoid aliasing `&mut` references.
-pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static> {
-    let level_4_table = active_level_4_table(physical_memory_offset);
-    OffsetPageTable::new(level_4_table, physical_memory_offset)
+/// `info` must be the pointer GRUB passed in EBX and lie in identity-mapped RAM.
+pub unsafe fn info_end(info: usize) -> u64 {
+    info as u64 + core::ptr::read(info as *const u32) as u64
 }
 
-/// Returns a mutable reference to the active level 4 page table
+/// Calls `f` for every available RAM region in the multiboot2 memory map.
 ///
 /// # Safety
-/// This function is unsafe because the caller must guarantee that the
-/// complete physical memory is mapped to virtual memory at the passed
-/// `physical_memory_offset`. Also, this function must be called only once
-/// to avoid aliasing `&mut` references.
-unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut PageTable {
-    use x86_64::registers::control::Cr3;
-    
-    let (level_4_table_frame, _) = Cr3::read();
-    
-    let phys = level_4_table_frame.start_address();
-    let virt = physical_memory_offset + phys.as_u64();
-    let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
-    
-    &mut *page_table_ptr
-}
-
-/// Create an example mapping of a page to a frame
-pub fn create_example_mapping(
-    page: Page,
-    mapper: &mut OffsetPageTable,
-    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-) -> Result<(), MapToError<Size4KiB>> {
-    use x86_64::structures::paging::MapperAllSizes;
-    
-    let frame = PhysFrame::containing_address(PhysAddr::new(0xb8000));
-    let flags = Flags::PRESENT | Flags::WRITABLE;
-    
-    unsafe {
-        mapper.map_to(page, frame, flags, frame_allocator)?.flush()
+/// `info` must be the pointer GRUB passed in EBX and lie in identity-mapped RAM.
+pub unsafe fn for_each_usable(info: usize, mut f: impl FnMut(Region)) {
+    if info == 0 || info as u64 >= IDENTITY_LIMIT {
+        return;
     }
-    
-    Ok(())
-}
-
-/// Physical frame wrapper
-pub struct PhysFrame {
-    start_address: PhysAddr,
-}
-
-impl PhysFrame {
-    pub fn containing_address(address: PhysAddr) -> Self {
-        PhysFrame {
-            start_address: address.align_down(4096),
+    let total = core::ptr::read(info as *const u32) as usize;
+    let mut tag = info + 8;
+    let end = info + total;
+    while tag + 8 <= end {
+        let ty = core::ptr::read(tag as *const u32);
+        let size = core::ptr::read((tag + 4) as *const u32) as usize;
+        if ty == TAG_END || size < 8 {
+            break;
         }
+        if ty == TAG_MMAP {
+            let entry_size = core::ptr::read((tag + 8) as *const u32) as usize;
+            let mut entry = tag + 16;
+            while entry_size >= 24 && entry + entry_size <= tag + size {
+                let base = core::ptr::read(entry as *const u64);
+                let len = core::ptr::read((entry + 8) as *const u64);
+                let kind = core::ptr::read((entry + 16) as *const u32);
+                if kind == MMAP_AVAILABLE {
+                    f(Region { base, len });
+                }
+                entry += entry_size;
+            }
+        }
+        tag += (size + 7) & !7;
     }
-    
-    pub fn start_address(&self) -> PhysAddr {
-        self.start_address
-    }
+}
+
+/// Prints the usable memory map and returns total usable bytes.
+///
+/// # Safety
+/// See [`for_each_usable`].
+pub unsafe fn report(info: usize) -> u64 {
+    let mut total = 0;
+    for_each_usable(info, |r| {
+        serial_println!("  usable: {:#012x} - {:#012x} ({} KiB)", r.base, r.end(), r.len / 1024);
+        total += r.len;
+    });
+    total
 }
