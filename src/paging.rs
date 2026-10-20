@@ -31,11 +31,11 @@ static FRAMES: Mutex<Option<Frames>> = Mutex::new(None);
 /// # Safety
 /// `info` must be the multiboot2 pointer; `floor` must be above everything
 /// already in use (kernel, multiboot info, heap). Heap must be initialised.
-pub unsafe fn init_frames(info: usize, floor: u64) -> usize {
+pub unsafe fn init_frames(floor: u64) -> usize {
     let mut regions = [(0u64, 0u64); MAX_REGIONS];
     let mut count = 0;
     let mut total = 0usize;
-    memory::for_each_usable(info, |r| {
+    memory::for_each_usable(|r| {
         let start = memory::align_up(r.base.max(floor), 4096);
         let end = r.end().min(memory::IDENTITY_LIMIT) & !4095;
         if end > start && count < MAX_REGIONS {

@@ -12,17 +12,12 @@ pub const HEAP_SIZE: u64 = 4 * 1024 * 1024;
 /// info structure, and hands it to the allocator. Returns (start, size).
 ///
 /// # Safety
-/// Call once. `info` must be the multiboot2 pointer from GRUB.
-pub unsafe fn init(info: usize) -> Option<(u64, u64)> {
-    let floor = memory::align_up(
-        memory::kernel_end_addr()
-            .max(memory::info_end(info))
-            .max(1024 * 1024),
-        4096,
-    );
+/// Call once, after `memory::init`.
+pub unsafe fn init() -> Option<(u64, u64)> {
+    let floor = memory::align_up(memory::kernel_end_addr().max(1024 * 1024), 4096);
 
     let mut found: Option<Region> = None;
-    memory::for_each_usable(info, |r| {
+    memory::for_each_usable(|r| {
         if found.is_some() {
             return;
         }

@@ -156,6 +156,8 @@ mod serial {
 // Entry point - called from the 32-bit stub above
 #[no_mangle]
 pub extern "C" fn _start(mb_info: usize) -> ! {
+    // Must run before anything else: the info struct may overlap our bss.
+    unsafe { memory::init(mb_info) };
     serial::init();
 
     serial_println!("POST CARD SPATIAL OS - BOOTED!");
@@ -172,16 +174,17 @@ pub extern "C" fn _start(mb_info: usize) -> ! {
     x86_64::instructions::interrupts::int3();
     serial_println!("[ok] breakpoint exception handled, execution resumed");
 
-    serial_println!("[..] multiboot2 info at {:#x}", mb_info);
+    let (is, ie) = memory::info_range();
+    serial_println!("[..] multiboot2 info was at {:#x}-{:#x} (copied, no longer used)", is, ie);
     serial_println!("[..] kernel image ends at {:#x}", memory::kernel_end_addr());
-    let total = unsafe { memory::report(mb_info) };
+    let total = memory::report();
     serial_println!("[ok] {} MiB usable RAM", total / (1024 * 1024));
 
-    match unsafe { heap::init(mb_info) } {
+    match unsafe { heap::init() } {
         Some((start, size)) => {
             serial_println!("[ok] heap: {:#x}, {} KiB", start, size / 1024);
             heap_selftest();
-            let n = unsafe { paging::init_frames(mb_info, start + size) };
+            let n = unsafe { paging::init_frames(start + size) };
             serial_println!("[ok] frame allocator: {} frames ({} MiB) above heap", n, n * 4 / 1024);
             unsafe { paging::remap_kernel() };
             serial_println!("[ok] kernel page tables active (W^X, NX, null + stack guard pages)");
