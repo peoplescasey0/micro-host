@@ -246,10 +246,19 @@ fn schedule() {
         s.current = s.tasks[next].id;
         let old = &mut s.tasks[cur].rsp as *mut u64;
         let new = s.tasks[next].rsp;
+        if let Some(slot) = s.tasks[next].slot {
+            // Ring 3 → 0 transitions of the next task land on its own stack.
+            crate::gdt::set_kernel_stack(slot_base(slot) + 4096 + STACK_PAGES * 4096);
+        }
         unsafe { switch_context(old, new) };
         // Resumed (possibly much later) on this task's stack.
         reap();
     });
+}
+
+/// Id of the running task.
+pub fn current_id() -> u64 {
+    sched().current
 }
 
 /// Gives other ready tasks a turn.

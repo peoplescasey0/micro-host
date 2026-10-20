@@ -82,6 +82,8 @@ fn run(line: &str) {
             kprintln!("mem             frame allocator usage");
             kprintln!("ps              list tasks");
             kprintln!("spawn           start a demo task (3 ticks, 1 s apart)");
+            kprintln!("user            run a ring 3 demo program");
+            kprintln!("crash           run a ring 3 program that misbehaves (gets killed)");
             kprintln!("reboot          reset the machine");
             kprintln!("halt            stop the CPU");
         }
@@ -106,6 +108,8 @@ fn run(line: &str) {
             });
             kprintln!("spawned task {}", id);
         }
+        "user" => kprintln!("spawned user task {}", crate::usermode::spawn("hello", crate::usermode::prog_hello())),
+        "crash" => kprintln!("spawned user task {}", crate::usermode::spawn("evil", crate::usermode::prog_evil())),
         "reboot" => unsafe {
             // Pulse the CPU reset line through the keyboard controller.
             x86_64::instructions::port::Port::<u8>::new(0x64).write(0xFE);

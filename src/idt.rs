@@ -43,7 +43,14 @@ extern "x86-interrupt" fn keyboard_irq(_frame: InterruptStackFrame) {
     pic::eoi(pic::KEYBOARD_VECTOR);
 }
 
+fn from_user(frame: &InterruptStackFrame) -> bool {
+    frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3
+}
+
 extern "x86-interrupt" fn divide_error(frame: InterruptStackFrame) {
+    if from_user(&frame) {
+        crate::usermode::kill_current("divide error", frame.instruction_pointer.as_u64());
+    }
     serial_println!("EXCEPTION: DIVIDE ERROR\n{:#?}", frame);
     halt();
 }
@@ -53,17 +60,27 @@ extern "x86-interrupt" fn breakpoint(frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn invalid_opcode(frame: InterruptStackFrame) {
+    if from_user(&frame) {
+        crate::usermode::kill_current("invalid opcode", frame.instruction_pointer.as_u64());
+    }
     serial_println!("EXCEPTION: INVALID OPCODE\n{:#?}", frame);
     halt();
 }
 
 extern "x86-interrupt" fn general_protection(frame: InterruptStackFrame, code: u64) {
+    if from_user(&frame) {
+        crate::usermode::kill_current("general protection fault", frame.instruction_pointer.as_u64());
+    }
     serial_println!("EXCEPTION: GENERAL PROTECTION FAULT (code {})\n{:#?}", code, frame);
     halt();
 }
 
 extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, code: PageFaultErrorCode) {
     let addr = x86_64::registers::control::Cr2::read();
+    if from_user(&frame) {
+        crate::kprintln!("[user] page fault at {:?} ({:?})", addr, code);
+        crate::usermode::kill_current("page fault", frame.instruction_pointer.as_u64());
+    }
     serial_println!(
         "EXCEPTION: PAGE FAULT at {:?} ({:?})\n{:#?}",
         addr,

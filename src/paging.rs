@@ -151,6 +151,21 @@ pub fn unmap_page(virt: u64) -> bool {
     }
 }
 
+/// Replaces the flags of the mapped 4 KiB page containing `virt`.
+pub fn set_page_flags(virt: u64, flags: PageTableFlags) -> bool {
+    let _np = NoPreempt::new();
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt));
+    unsafe {
+        match mapper().update_flags(page, flags | PageTableFlags::PRESENT) {
+            Ok(flush) => {
+                flush.flush();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
 extern "C" {
     static __text_start: u8;
     static __rodata_start: u8;

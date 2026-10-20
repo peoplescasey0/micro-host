@@ -17,6 +17,7 @@ mod pic;
 mod sched;
 mod shell;
 mod sync;
+mod usermode;
 mod vga;
 
 use core::panic::PanicInfo;
@@ -226,6 +227,8 @@ pub extern "C" fn _start(mb_info: usize) -> ! {
     sched::init("shell");
     sched_selftest();
     preempt_selftest();
+    usermode::init();
+    usermode_selftest();
 
     let mut shell = shell::Shell::new();
     let mut decoder = keyboard::Decoder::new();
@@ -285,6 +288,29 @@ fn preempt_selftest() {
     assert!(a > 0 && b > 0, "a spinner starved: {} {}", a, b);
     assert_eq!(DONE.load(SeqCst), 2, "alloc tasks did not finish");
     serial_println!("[ok] preemption: non-yielding tasks both ran (A={}, B={}), alloc/serial stress ok", a, b);
+}
+
+fn usermode_selftest() {
+    use core::sync::atomic::Ordering::SeqCst;
+    let wait_all = || {
+        let t0 = pic::ticks();
+        while sched::live_tasks() > 1 {
+            assert!(pic::ticks() < t0 + 500, "user process did not finish");
+            x86_64::instructions::hlt();
+        }
+    };
+
+    usermode::spawn("hello", usermode::prog_hello());
+    wait_all();
+    assert_eq!(usermode::LAST_EXIT.load(SeqCst), 42, "user exit code");
+    serial_println!("[ok] user mode: ring 3 process ran, syscalls write/sleep/exit worked (exit code 42)");
+    let frames = paging::frames_in_use();
+
+    usermode::spawn("evil", usermode::prog_evil());
+    wait_all();
+    assert_eq!(usermode::KILLED.load(SeqCst), 1, "evil process should have been killed");
+    assert_eq!(paging::frames_in_use(), frames, "user pages leaked");
+    serial_println!("[ok] user mode: kernel pointer rejected, kernel read faulted, process killed, no frames leaked");
 }
 
 fn sched_selftest() {
