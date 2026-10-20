@@ -94,6 +94,21 @@ impl fmt::Write for Writer {
     }
 }
 
+/// Blanks from the cursor to the end of the row (cursor stays).
+pub fn clear_eol() {
+    let w = WRITER.lock();
+    for c in w.col..WIDTH {
+        put(w.row, c, ATTR | b' ' as u16);
+    }
+}
+
+/// Moves the cursor `n` columns left within the row.
+pub fn cursor_left(n: usize) {
+    let mut w = WRITER.lock();
+    w.col = w.col.saturating_sub(n);
+    w.update_cursor();
+}
+
 pub fn clear() {
     let mut w = WRITER.lock();
     for r in 0..HEIGHT {

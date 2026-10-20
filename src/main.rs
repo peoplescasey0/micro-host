@@ -232,15 +232,18 @@ pub extern "C" fn _start(mb_info: usize) -> ! {
 
     let mut shell = shell::Shell::new();
     let mut decoder = keyboard::Decoder::new();
+    let mut ansi = keyboard::AnsiDecoder::new();
     shell.start();
     loop {
         while let Some(sc) = keyboard::pop() {
-            if let Some(c) = decoder.feed(sc) {
-                shell.input(c);
+            if let Some(key) = decoder.feed(sc) {
+                shell.input(key);
             }
         }
         while let Some(b) = serial::try_read() {
-            shell.input(if b == b'\r' { '\n' } else { b as char });
+            if let Some(key) = ansi.feed(b) {
+                shell.input(key);
+            }
         }
         sched::yield_now();
         x86_64::instructions::hlt();
