@@ -142,7 +142,94 @@ pub fn unmap_page(virt: u64) -> bool {
     }
 }
 
+extern "C" {
+    static __text_start: u8;
+    static __rodata_start: u8;
+    static __data_start: u8;
+    static kernel_end: u8;
+    static boot_stack_guard: u8;
+}
+
+const MIB2: u64 = 2 * 1024 * 1024;
+
+/// Replaces the boot page tables with kernel-owned ones:
+/// * page 0 unmapped (null-pointer guard)
+/// * kernel text RX, rodata R+NX, data/bss RW+NX (W^X)
+/// * guard pages (unmapped) below the boot stack and double-fault stack
+/// * remaining RAM below 1 GiB identity-mapped RW+NX (2 MiB pages, except the
+///   first 2 MiB which uses 4 KiB pages)
+///
+/// # Safety
+/// Frame allocator must be initialised; boot identity map must be active.
+pub unsafe fn remap_kernel() {
+    use x86_64::registers::control::{Cr0, Cr0Flags, Cr3Flags, Efer, EferFlags};
+    use x86_64::structures::paging::Size2MiB;
+
+    Efer::update(|f| *f |= EferFlags::NO_EXECUTE_ENABLE);
+    Cr0::update(|f| *f |= Cr0Flags::WRITE_PROTECT);
+
+    let mut alloc = KernelFrames;
+    let pml4_frame = alloc.allocate_frame().expect("pml4 frame");
+    let pml4 = &mut *(pml4_frame.start_address().as_u64() as *mut PageTable);
+    let mut m = OffsetPageTable::new(pml4, VirtAddr::new(0));
+
+    let text = core::ptr::addr_of!(__text_start) as u64;
+    let rodata = core::ptr::addr_of!(__rodata_start) as u64;
+    let data = core::ptr::addr_of!(__data_start) as u64;
+    let kend = memory::align_up(core::ptr::addr_of!(kernel_end) as u64, 4096);
+    let guards = [core::ptr::addr_of!(boot_stack_guard) as u64, crate::gdt::df_guard_page()];
+
+    let p = PageTableFlags::PRESENT;
+    let nx = PageTableFlags::NO_EXECUTE;
+    let w = PageTableFlags::WRITABLE;
+
+    // First 2 MiB with 4 KiB granularity.
+    let mut addr = 4096; // page 0 stays unmapped
+    while addr < MIB2 {
+        let flags = if addr >= kend || addr < text {
+            p | w | nx
+        } else if guards.contains(&addr) {
+            addr += 4096;
+            continue;
+        } else if addr < rodata {
+            p // text: RX
+        } else if addr < data {
+            p | nx // rodata: R
+        } else {
+            p | w | nx
+        };
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(addr));
+        let frame = PhysFrame::containing_address(PhysAddr::new(addr));
+        m.map_to(page, frame, flags, &mut alloc).expect("map kernel page").ignore();
+        addr += 4096;
+    }
+    // Everything else below the identity limit: 2 MiB pages, RW+NX.
+    let mut addr = MIB2;
+    while addr < memory::IDENTITY_LIMIT {
+        let page = Page::<Size2MiB>::containing_address(VirtAddr::new(addr));
+        let frame = PhysFrame::<Size2MiB>::containing_address(PhysAddr::new(addr));
+        m.map_to(page, frame, p | w | nx, &mut alloc).expect("map 2M page").ignore();
+        addr += MIB2;
+    }
+
+    // Guards outside the first 2 MiB (should not happen with a 1 MiB kernel).
+    for g in guards {
+        assert!(g < MIB2, "guard page outside first 2 MiB");
+    }
+
+    Cr3::write(pml4_frame, Cr3Flags::empty());
+}
+
 /// Virtual → physical translation using the live page tables.
 pub fn translate(virt: u64) -> Option<PhysAddr> {
     unsafe { mapper().translate_addr(VirtAddr::new(virt)) }
+}
+
+/// Flags of the 4 KiB page containing `virt`, if mapped as a 4 KiB page.
+pub fn page_flags(virt: u64) -> Option<PageTableFlags> {
+    use x86_64::structures::paging::mapper::TranslateResult;
+    match unsafe { mapper().translate(VirtAddr::new(virt)) } {
+        TranslateResult::Mapped { flags, .. } => Some(flags),
+        _ => None,
+    }
 }

@@ -112,7 +112,10 @@ global_asm!(
     "   .skip 4096",
     "boot_pd:",
     "   .skip 4096",
-    ".align 16",
+    ".align 4096",
+    ".global boot_stack_guard",
+    "boot_stack_guard:",
+    "   .skip 4096",
     "boot_stack:",
     "   .skip 65536",
     "boot_stack_top:",
@@ -180,6 +183,9 @@ pub extern "C" fn _start(mb_info: usize) -> ! {
             heap_selftest();
             let n = unsafe { paging::init_frames(mb_info, start + size) };
             serial_println!("[ok] frame allocator: {} frames ({} MiB) above heap", n, n * 4 / 1024);
+            unsafe { paging::remap_kernel() };
+            serial_println!("[ok] kernel page tables active (W^X, NX, null + stack guard pages)");
+            remap_check();
             paging_selftest();
         }
         None => serial_println!("[!!] no suitable region for heap"),
@@ -205,6 +211,23 @@ pub extern "C" fn _start(mb_info: usize) -> ! {
             serial_println!("key scancode: {:#04x}", pic::last_scancode());
         }
     }
+}
+
+fn remap_check() {
+    use x86_64::structures::paging::PageTableFlags as F;
+    static DATA_PROBE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+    static RO_PROBE: [u8; 8] = *b"rodata!!";
+    let text = remap_check as usize as u64;
+    let data = core::ptr::addr_of!(DATA_PROBE) as u64;
+    let ro = core::ptr::addr_of!(RO_PROBE) as u64;
+    let tf = paging::page_flags(text).expect("text mapped");
+    let df = paging::page_flags(data).expect("data mapped");
+    let rf = paging::page_flags(ro).expect("rodata mapped");
+    assert!(!tf.contains(F::WRITABLE) && !tf.contains(F::NO_EXECUTE), "text must be RX");
+    assert!(df.contains(F::WRITABLE) && df.contains(F::NO_EXECUTE), "data must be RW+NX");
+    assert!(!rf.contains(F::WRITABLE) && rf.contains(F::NO_EXECUTE), "rodata must be R+NX");
+    assert!(paging::translate(0).is_none(), "null page mapped");
+    serial_println!("[ok] layout: text {:#x} RX, rodata {:#x} R, data {:#x} RW+NX, null page unmapped", text, ro, data);
 }
 
 fn paging_selftest() {

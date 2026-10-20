@@ -10,7 +10,9 @@ SECTIONS
 
     /* Boot section FIRST - contains multiboot2 header and 32-bit entry stub */
     /* This must be at the very start so GRUB finds the header */
+    /* Section boundaries for paging (all 4K aligned) */
     .text.boot : ALIGN(4K) {
+        __text_start = .;
         *(.text.boot)
     }
 
@@ -22,12 +24,14 @@ SECTIONS
 
     /* Read-only data */
     .rodata : ALIGN(4K) {
+        __rodata_start = .;
         *(.rodata)
         *(.rodata.*)
     }
 
     /* Initialized data (and GOT: some calls, e.g. memcpy, go through GOT slots) */
     .data : ALIGN(4K) {
+        __data_start = .;
         *(.data)
         *(.data.*)
         *(.got)
@@ -39,6 +43,7 @@ SECTIONS
         *(COMMON)
         *(.bss)
         *(.bss.*)
+        . = ALIGN(4K);
     }
 
     /* Discard unnecessary sections to keep binary clean */

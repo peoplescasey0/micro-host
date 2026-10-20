@@ -8,15 +8,23 @@ use x86_64::VirtAddr;
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 const DF_STACK_SIZE: usize = 4096 * 5;
 
-#[repr(align(16))]
-struct Stack([u8; DF_STACK_SIZE]);
-static mut DF_STACK: Stack = Stack([0; DF_STACK_SIZE]);
+#[repr(C, align(4096))]
+struct Stack {
+    guard: [u8; 4096], // left unmapped by paging::remap_kernel
+    data: [u8; DF_STACK_SIZE],
+}
+static mut DF_STACK: Stack = Stack { guard: [0; 4096], data: [0; DF_STACK_SIZE] };
+
+/// Address of the (page-sized) guard below the double-fault stack.
+pub fn df_guard_page() -> u64 {
+    core::ptr::addr_of!(DF_STACK) as u64
+}
 
 static TSS: Lazy<TaskStateSegment> = Lazy::new(|| {
     let mut tss = TaskStateSegment::new();
     tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
         let start = VirtAddr::from_ptr(core::ptr::addr_of!(DF_STACK));
-        start + DF_STACK_SIZE as u64
+        start + (4096 + DF_STACK_SIZE) as u64
     };
     tss
 });
