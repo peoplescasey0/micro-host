@@ -11,6 +11,7 @@ mod gdt;
 mod heap;
 mod idt;
 mod memory;
+mod pic;
 
 use core::panic::PanicInfo;
 use core::arch::global_asm;
@@ -180,11 +181,25 @@ pub extern "C" fn _start(mb_info: usize) -> ! {
         None => serial_println!("[!!] no suitable region for heap"),
     }
 
-    serial_println!("");
-    serial_println!("Spatial OS is ALIVE!");
+    pic::init();
+    serial_println!("[ok] PIC remapped to vectors 32-47, PIT at {} Hz", pic::TIMER_HZ);
+    x86_64::instructions::interrupts::enable();
+    while pic::ticks() < pic::TIMER_HZ {
+        x86_64::instructions::hlt();
+    }
+    serial_println!("[ok] timer IRQ: {} ticks received (~1 second)", pic::ticks());
 
+    serial_println!("");
+    serial_println!("Spatial OS is ALIVE! (press keys in the QEMU window to see scancodes)");
+
+    let mut seen_keys = 0;
     loop {
         x86_64::instructions::hlt();
+        let n = pic::key_count();
+        if n != seen_keys {
+            seen_keys = n;
+            serial_println!("key scancode: {:#04x}", pic::last_scancode());
+        }
     }
 }
 

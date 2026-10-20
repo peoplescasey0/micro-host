@@ -1,11 +1,13 @@
 //! IDT with CPU exception handlers.
 
-use crate::{gdt, serial_println};
+use crate::{gdt, pic, serial_println};
 use spin::Lazy;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     let mut idt = InterruptDescriptorTable::new();
+    idt[pic::TIMER_VECTOR].set_handler_fn(timer_irq);
+    idt[pic::KEYBOARD_VECTOR].set_handler_fn(keyboard_irq);
     idt.divide_error.set_handler_fn(divide_error);
     idt.breakpoint.set_handler_fn(breakpoint);
     idt.invalid_opcode.set_handler_fn(invalid_opcode);
@@ -27,6 +29,17 @@ fn halt() -> ! {
     loop {
         x86_64::instructions::hlt();
     }
+}
+
+// IRQ handlers must not print: the main code may hold the serial lock.
+extern "x86-interrupt" fn timer_irq(_frame: InterruptStackFrame) {
+    pic::on_timer();
+    pic::eoi(pic::TIMER_VECTOR);
+}
+
+extern "x86-interrupt" fn keyboard_irq(_frame: InterruptStackFrame) {
+    pic::on_keyboard();
+    pic::eoi(pic::KEYBOARD_VECTOR);
 }
 
 extern "x86-interrupt" fn divide_error(frame: InterruptStackFrame) {
