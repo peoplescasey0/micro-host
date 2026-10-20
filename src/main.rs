@@ -11,6 +11,7 @@ mod gdt;
 mod heap;
 mod idt;
 mod memory;
+mod paging;
 mod pic;
 
 use core::panic::PanicInfo;
@@ -177,6 +178,9 @@ pub extern "C" fn _start(mb_info: usize) -> ! {
         Some((start, size)) => {
             serial_println!("[ok] heap: {:#x}, {} KiB", start, size / 1024);
             heap_selftest();
+            let n = unsafe { paging::init_frames(mb_info, start + size) };
+            serial_println!("[ok] frame allocator: {} frames ({} MiB) above heap", n, n * 4 / 1024);
+            paging_selftest();
         }
         None => serial_println!("[!!] no suitable region for heap"),
     }
@@ -201,6 +205,40 @@ pub extern "C" fn _start(mb_info: usize) -> ! {
             serial_println!("key scancode: {:#04x}", pic::last_scancode());
         }
     }
+}
+
+fn paging_selftest() {
+    use x86_64::structures::paging::PageTableFlags as F;
+    const A: u64 = 0x4000_0000; // 1 GiB: outside the boot identity map
+    const B: u64 = 0x4000_1000;
+    let rw = F::WRITABLE;
+
+    let before = paging::frames_in_use();
+    assert!(paging::translate(A).is_none(), "A already mapped");
+    let pa = paging::map_new_page(A, rw).expect("map A");
+    let pb = paging::map_new_page(B, rw).expect("map B");
+    assert_eq!(paging::translate(A), Some(pa));
+    assert_eq!(paging::translate(B), Some(pb));
+    unsafe {
+        (A as *mut u64).write_volatile(0xDEAD_BEEF_CAFE_F00D);
+        (B as *mut u64).write_volatile(0x1122_3344_5566_7788);
+        assert_eq!((A as *const u64).read_volatile(), 0xDEAD_BEEF_CAFE_F00D);
+        assert_eq!((B as *const u64).read_volatile(), 0x1122_3344_5566_7788);
+        // Same data visible through the identity mapping of the frame.
+        assert_eq!((pa.as_u64() as *const u64).read_volatile(), 0xDEAD_BEEF_CAFE_F00D);
+    }
+    serial_println!("[ok] paging: {:#x} -> {:#x}, {:#x} -> {:#x}, read/write verified",
+        A, pa.as_u64(), B, pb.as_u64());
+
+    assert!(paging::unmap_page(A));
+    assert!(paging::unmap_page(B));
+    assert!(paging::translate(A).is_none());
+    let pc = paging::map_new_page(A, rw).expect("remap A");
+    assert!(pc == pb || pc == pa, "freed frame not reused");
+    unsafe { assert_eq!((A as *const u64).read_volatile(), 0, "frame not zeroed") };
+    assert!(paging::unmap_page(A));
+    serial_println!("[ok] unmap + frame reuse + zeroing verified ({} frames in use, {} for page tables)",
+        paging::frames_in_use(), paging::frames_in_use() - before);
 }
 
 fn heap_selftest() {
