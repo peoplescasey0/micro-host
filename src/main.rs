@@ -16,6 +16,7 @@ mod paging;
 mod pic;
 mod sched;
 mod shell;
+mod sync;
 mod vga;
 
 use core::panic::PanicInfo;
@@ -127,7 +128,7 @@ global_asm!(
 // Minimal serial implementation
 mod serial {
     use uart_16550::SerialPort;
-    use spin::Mutex;
+    use crate::sync::Mutex;
     use core::fmt;
 
     pub static SERIAL1: Mutex<SerialPort> = Mutex::new(unsafe { SerialPort::new(0x3F8) });
@@ -224,6 +225,7 @@ pub extern "C" fn _start(mb_info: usize) -> ! {
 
     sched::init("shell");
     sched_selftest();
+    preempt_selftest();
 
     let mut shell = shell::Shell::new();
     let mut decoder = keyboard::Decoder::new();
@@ -240,6 +242,49 @@ pub extern "C" fn _start(mb_info: usize) -> ! {
         sched::yield_now();
         x86_64::instructions::hlt();
     }
+}
+
+fn preempt_selftest() {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    static STOP: AtomicBool = AtomicBool::new(false);
+    static SPIN_A: AtomicU64 = AtomicU64::new(0);
+    static SPIN_B: AtomicU64 = AtomicU64::new(0);
+    static DONE: AtomicU64 = AtomicU64::new(0);
+
+    sched::enable_preemption();
+
+    // Two busy loops that never yield must both make progress.
+    sched::spawn("spinA", || while !STOP.load(SeqCst) { SPIN_A.fetch_add(1, SeqCst); });
+    sched::spawn("spinB", || while !STOP.load(SeqCst) { SPIN_B.fetch_add(1, SeqCst); });
+    // Heap + serial users that get preempted at arbitrary points: no deadlock,
+    // no corruption.
+    for name in ["allocA", "allocB"] {
+        sched::spawn(name, move || {
+            let mut sum = 0u64;
+            for i in 0..3000u64 {
+                let v: alloc::vec::Vec<u64> = (0..64).map(|x| x + i).collect();
+                sum += v.iter().sum::<u64>();
+                if i % 1000 == 0 {
+                    serial_println!("[{}] iteration {}", name, i);
+                }
+            }
+            core::hint::black_box(sum);
+            DONE.fetch_add(1, SeqCst);
+        });
+    }
+
+    let t0 = pic::ticks();
+    while pic::ticks() < t0 + 30 {
+        x86_64::instructions::hlt();
+    }
+    STOP.store(true, SeqCst);
+    while sched::live_tasks() > 1 {
+        x86_64::instructions::hlt();
+    }
+    let (a, b) = (SPIN_A.load(SeqCst), SPIN_B.load(SeqCst));
+    assert!(a > 0 && b > 0, "a spinner starved: {} {}", a, b);
+    assert_eq!(DONE.load(SeqCst), 2, "alloc tasks did not finish");
+    serial_println!("[ok] preemption: non-yielding tasks both ran (A={}, B={}), alloc/serial stress ok", a, b);
 }
 
 fn sched_selftest() {

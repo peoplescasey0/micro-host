@@ -1,7 +1,7 @@
 //! VGA text mode (80x25) console at 0xB8000.
 
 use core::fmt;
-use spin::Mutex;
+use crate::sync::Mutex;
 use x86_64::instructions::port::Port;
 
 const WIDTH: usize = 80;

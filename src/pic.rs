@@ -90,10 +90,3 @@ pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-pub fn key_count() -> u64 {
-    KEY_COUNT.load(Ordering::Relaxed)
-}
-
-pub fn last_scancode() -> u8 {
-    LAST_SCANCODE.load(Ordering::Relaxed)
-}

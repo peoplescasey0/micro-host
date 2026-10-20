@@ -4,7 +4,7 @@
 
 use crate::memory;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::{Mutex, NoPreempt};
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{
     mapper::MapToError, FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page,
@@ -118,6 +118,7 @@ unsafe fn mapper() -> OffsetPageTable<'static> {
 
 /// Maps `virt` to a freshly allocated frame.
 pub fn map_new_page(virt: u64, flags: PageTableFlags) -> Result<PhysAddr, MapToError<Size4KiB>> {
+    let _np = NoPreempt::new(); // page-table edits must not interleave
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt));
     let mut alloc = KernelFrames;
     let frame = alloc.allocate_frame().ok_or(MapToError::FrameAllocationFailed)?;
@@ -136,6 +137,7 @@ pub fn map_new_page(virt: u64, flags: PageTableFlags) -> Result<PhysAddr, MapToE
 
 /// Unmaps `virt` and returns its frame to the allocator.
 pub fn unmap_page(virt: u64) -> bool {
+    let _np = NoPreempt::new();
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt));
     unsafe {
         match mapper().unmap(page) {

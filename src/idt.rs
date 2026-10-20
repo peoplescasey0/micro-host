@@ -35,6 +35,7 @@ fn halt() -> ! {
 extern "x86-interrupt" fn timer_irq(_frame: InterruptStackFrame) {
     pic::on_timer();
     pic::eoi(pic::TIMER_VECTOR);
+    crate::sched::on_tick(); // may switch tasks; EOI must already be sent
 }
 
 extern "x86-interrupt" fn keyboard_irq(_frame: InterruptStackFrame) {

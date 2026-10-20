@@ -1,10 +1,26 @@
 //! Kernel heap, carved out of identity-mapped usable RAM.
 
 use crate::memory::{self, Region};
+use crate::sync::NoPreempt;
+use core::alloc::{GlobalAlloc, Layout};
 use linked_list_allocator::LockedHeap;
 
+/// Heap whose operations are never interrupted by a task switch.
+struct KernelHeap(LockedHeap);
+
+unsafe impl GlobalAlloc for KernelHeap {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let _np = NoPreempt::new();
+        self.0.alloc(layout)
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let _np = NoPreempt::new();
+        self.0.dealloc(ptr, layout)
+    }
+}
+
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: KernelHeap = KernelHeap(LockedHeap::empty());
 
 pub const HEAP_SIZE: u64 = 4 * 1024 * 1024;
 
@@ -29,6 +45,6 @@ pub unsafe fn init() -> Option<(u64, u64)> {
     });
 
     let region = found?;
-    ALLOCATOR.lock().init(region.base as *mut u8, region.len as usize);
+    ALLOCATOR.0.lock().init(region.base as *mut u8, region.len as usize);
     Some((region.base, region.len))
 }
