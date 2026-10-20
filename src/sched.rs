@@ -64,6 +64,7 @@ struct Task {
     state: State,
     rsp: u64,
     slot: Option<usize>, // stack slot; None for the boot task
+    cr3: u64,            // page table of a user process; 0 = kernel's
     entry: Option<Box<dyn FnOnce() + Send>>,
 }
 
@@ -93,6 +94,7 @@ pub fn init(name: &'static str) {
         state: State::Running,
         rsp: 0, // filled in at the first switch away
         slot: None,
+        cr3: 0,
         entry: None,
     });
     unsafe {
@@ -168,6 +170,7 @@ pub fn spawn<F: FnOnce() + Send + 'static>(name: &'static str, f: F) -> u64 {
         state: State::Ready,
         rsp,
         slot: Some(slot),
+        cr3: 0,
         entry: Some(Box::new(f)),
     }));
     id
@@ -250,6 +253,8 @@ fn schedule() {
             // Ring 3 → 0 transitions of the next task land on its own stack.
             crate::gdt::set_kernel_stack(slot_base(slot) + 4096 + STACK_PAGES * 4096);
         }
+        let cr3 = s.tasks[next].cr3;
+        paging::switch_to(if cr3 == 0 { paging::kernel_cr3() } else { cr3 });
         unsafe { switch_context(old, new) };
         // Resumed (possibly much later) on this task's stack.
         reap();
@@ -259,6 +264,16 @@ fn schedule() {
 /// Id of the running task.
 pub fn current_id() -> u64 {
     sched().current
+}
+
+/// Gives the running task its own page table (0 = back to the kernel's) and
+/// activates it. The scheduler loads it again whenever the task is resumed.
+pub fn set_current_cr3(cr3: u64) {
+    let _np = NoPreempt::new();
+    let s = sched();
+    let idx = current_index(s);
+    s.tasks[idx].cr3 = cr3;
+    paging::switch_to(if cr3 == 0 { paging::kernel_cr3() } else { cr3 });
 }
 
 /// Gives other ready tasks a turn.

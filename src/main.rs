@@ -303,9 +303,9 @@ fn usermode_selftest() {
         }
     };
 
-    usermode::spawn("hello", usermode::prog_hello());
+    let hello = usermode::spawn("hello", usermode::prog_hello());
     wait_all();
-    assert_eq!(usermode::LAST_EXIT.load(SeqCst), 42, "user exit code");
+    assert_eq!(usermode::exit_code(hello), Some(42), "user exit code");
     serial_println!("[ok] user mode: ring 3 process ran, syscalls write/sleep/exit worked (exit code 42)");
     let frames = paging::frames_in_use();
 
@@ -314,6 +314,15 @@ fn usermode_selftest() {
     assert_eq!(usermode::KILLED.load(SeqCst), 1, "evil process should have been killed");
     assert_eq!(paging::frames_in_use(), frames, "user pages leaked");
     serial_println!("[ok] user mode: kernel pointer rejected, kernel read faulted, process killed, no frames leaked");
+
+    // Two processes use the same virtual address at the same time.
+    let poke = usermode::spawn("poke", usermode::prog_poke());
+    let peek = usermode::spawn("peek", usermode::prog_peek());
+    wait_all();
+    assert_eq!(usermode::exit_code(peek), Some(5), "peek saw another process's memory");
+    assert_eq!(usermode::exit_code(poke), Some(7), "poke's data was corrupted");
+    assert_eq!(paging::frames_in_use(), frames, "address space leaked");
+    serial_println!("[ok] address spaces: same virtual address, separate memory (poke/peek), all page tables freed");
 }
 
 fn sched_selftest() {

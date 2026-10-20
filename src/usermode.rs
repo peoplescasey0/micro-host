@@ -1,10 +1,10 @@
 //! Ring 3 support: `syscall`/`sysret` entry, user process setup and teardown.
 //!
-//! A user process is a scheduler task that maps a code page and a stack in its
-//! own slot of the user region (USER_BASE + slot * 1 MiB), then drops to ring 3
-//! with `iretq`. All processes share one address space; user pages are the only
-//! pages with the USER bit, so user code cannot touch kernel memory, but
-//! processes can still see each other (no per-process page tables yet).
+//! A user process is a scheduler task with its own page tables: a private PML4
+//! that shares the kernel mappings (supervisor-only) and maps the process's
+//! code page and stack at USER_BASE, in a PML4 entry no other process shares.
+//! The scheduler loads the task's CR3 whenever it runs. Every process sees
+//! the same virtual layout but different physical memory.
 //!
 //! Syscall ABI: number in rax, arguments in rdi, rsi, rdx; result in rax.
 //! Only rbx, rbp, r12-r15 are preserved (rcx/r11 are clobbered by `syscall`).
@@ -14,20 +14,19 @@
 //!   3 sleep(ticks)      10 ms ticks
 //!   4 yield()
 
-use crate::sync::Mutex;
+use crate::sync::{Mutex, NoPreempt};
 use crate::{gdt, kprint, kprintln, paging, sched};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::arch::{asm, global_asm};
-use core::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use x86_64::registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
 use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 
-pub const USER_BASE: u64 = 0x1_0000_0000;
-const SLOT_SIZE: u64 = 1 << 20;
-const MAX_SLOTS: u64 = 64;
+pub const USER_BASE: u64 = 0x80_0000_0000; // PML4 entry 1 (entry 0 = kernel)
+const REGION_SIZE: u64 = 1 << 20;
 const CODE_OFFSET: u64 = 0;
 const STACK_GUARD_OFFSET: u64 = 0x7_0000; // unmapped
 const STACK_PAGES: u64 = 4;
@@ -39,13 +38,16 @@ pub const SYS_GETPID: u64 = 2;
 pub const SYS_SLEEP: u64 = 3;
 pub const SYS_YIELD: u64 = 4;
 
-/// Exit code of the most recent process that called `exit`.
-pub static LAST_EXIT: AtomicI64 = AtomicI64::new(i64::MIN);
 /// Number of processes killed by the kernel after a fault.
 pub static KILLED: AtomicUsize = AtomicUsize::new(0);
 
-static SLOTS: AtomicU64 = AtomicU64::new(0);
-static PROCS: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new()); // (task id, slot)
+static EXITS: Mutex<Vec<(u64, i64)>> = Mutex::new(Vec::new()); // (task id, exit code)
+static PROCS: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new()); // (task id, pml4)
+
+/// Exit code recorded by `exit` for the given task id, if it has exited.
+pub fn exit_code(task: u64) -> Option<i64> {
+    EXITS.lock().iter().find(|e| e.0 == task).map(|e| e.1)
+}
 
 #[no_mangle]
 static mut SYSCALL_SCRATCH: u64 = 0;
@@ -117,6 +119,41 @@ global_asm!(
     ".Levil_msg:",
     "   .ascii \"bad pointer rejected; now touching kernel memory\\n\"",
     "user_evil_end:",
+    // Writes a marker to the top of its stack, sleeps, checks it survived.
+    ".global user_poke_start",
+    ".global user_poke_end",
+    "user_poke_start:",
+    "   lea rbx, [rsp - 8]",
+    "   movabs r12, 0x1122334455667788",
+    "   mov [rbx], r12",
+    "   mov eax, 3",
+    "   mov edi, 50",
+    "   syscall",
+    "   cmp [rbx], r12",
+    "   mov edi, 7",
+    "   je .Lpoke_done",
+    "   mov edi, 99",
+    ".Lpoke_done:",
+    "   mov eax, 1",
+    "   syscall",
+    "user_poke_end:",
+    // Reads the same virtual address while poke sleeps: must see zero.
+    ".global user_peek_start",
+    ".global user_peek_end",
+    "user_peek_start:",
+    "   lea rbx, [rsp - 8]",
+    "   mov eax, 3",
+    "   mov edi, 10",
+    "   syscall",
+    "   mov rax, [rbx]",
+    "   test rax, rax",
+    "   mov edi, 5",
+    "   jz .Lpeek_done",
+    "   mov edi, 66",
+    ".Lpeek_done:",
+    "   mov eax, 1",
+    "   syscall",
+    "user_peek_end:",
     ".section .text",
 );
 
@@ -126,12 +163,27 @@ extern "C" {
     static user_hello_end: u8;
     static user_evil_start: u8;
     static user_evil_end: u8;
+    static user_poke_start: u8;
+    static user_poke_end: u8;
+    static user_peek_start: u8;
+    static user_peek_end: u8;
 }
 
 fn slice(start: &'static u8, end: &'static u8) -> &'static [u8] {
     let s = start as *const u8 as usize;
     let e = end as *const u8 as usize;
     unsafe { core::slice::from_raw_parts(s as *const u8, e - s) }
+}
+
+/// Writes a marker to its stack, sleeps 50 ticks, exits 7 if it is intact.
+pub fn prog_poke() -> &'static [u8] {
+    unsafe { slice(&user_poke_start, &user_poke_end) }
+}
+
+/// Reads poke's marker address from another address space: exits 5 if it
+/// sees zero (isolated), 66 if it sees poke's data.
+pub fn prog_peek() -> &'static [u8] {
+    unsafe { slice(&user_peek_start, &user_peek_end) }
 }
 
 /// Prints three times, sleeping between, then exits with code 42.
@@ -156,27 +208,9 @@ pub fn init() {
     }
 }
 
-fn slot_base(slot: u64) -> u64 {
-    USER_BASE + slot * SLOT_SIZE
-}
-
-fn alloc_slot() -> u64 {
-    loop {
-        let cur = SLOTS.load(Ordering::SeqCst);
-        let free = (!cur).trailing_zeros() as u64;
-        assert!(free < MAX_SLOTS, "out of user slots");
-        if SLOTS
-            .compare_exchange(cur, cur | (1 << free), Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            return free;
-        }
-    }
-}
-
-fn my_slot() -> Option<u64> {
+fn is_user_task() -> bool {
     let id = sched::current_id();
-    PROCS.lock().iter().find(|p| p.0 == id).map(|p| p.1)
+    PROCS.lock().iter().any(|p| p.0 == id)
 }
 
 /// Spawns a user process running the machine code in `code` (at most 4 KiB,
@@ -187,9 +221,10 @@ pub fn spawn(name: &'static str, code: &'static [u8]) -> u64 {
 }
 
 fn run(code: &'static [u8]) -> ! {
-    let slot = alloc_slot();
-    let base = slot_base(slot);
-    PROCS.lock().push((sched::current_id(), slot));
+    let base = USER_BASE;
+    let pml4 = paging::new_user_space();
+    PROCS.lock().push((sched::current_id(), pml4));
+    sched::set_current_cr3(pml4); // from here on we run in our own address space
 
     let user = PageTableFlags::USER_ACCESSIBLE;
     let code_va = base + CODE_OFFSET;
@@ -227,22 +262,19 @@ fn run(code: &'static [u8]) -> ! {
     }
 }
 
-/// Unmaps the current process's pages and releases its slot.
+/// Frees the current process's whole address space.
 fn teardown() {
     let id = sched::current_id();
-    let slot = {
+    let pml4 = {
         let mut p = PROCS.lock();
         match p.iter().position(|e| e.0 == id) {
             Some(i) => p.swap_remove(i).1,
             None => return,
         }
     };
-    let base = slot_base(slot);
-    paging::unmap_page(base + CODE_OFFSET);
-    for i in 0..STACK_PAGES {
-        paging::unmap_page(base + STACK_GUARD_OFFSET + 4096 + i * 4096);
-    }
-    SLOTS.fetch_and(!(1 << slot), Ordering::SeqCst);
+    let _np = NoPreempt::new();
+    sched::set_current_cr3(0); // back on the kernel's page tables
+    paging::destroy_user_space(pml4);
 }
 
 /// Terminates the current process after a fault in ring 3.
@@ -254,17 +286,19 @@ pub fn kill_current(reason: &str, rip: u64) -> ! {
 }
 
 fn exit_current(code: i64) -> ! {
-    LAST_EXIT.store(code, Ordering::SeqCst);
+    EXITS.lock().push((sched::current_id(), code));
     teardown();
     sched::exit()
 }
 
-/// Checks that [ptr, ptr+len) lies in the caller's user slot on USER pages.
+/// Checks that [ptr, ptr+len) lies in the user region on USER pages of the
+/// caller's own address space.
 fn user_range_ok(ptr: u64, len: u64) -> bool {
-    let Some(slot) = my_slot() else { return false };
-    let base = slot_base(slot);
+    if !is_user_task() {
+        return false;
+    }
     let Some(end) = ptr.checked_add(len) else { return false };
-    if ptr < base || end > base + SLOT_SIZE {
+    if ptr < USER_BASE || end > USER_BASE + REGION_SIZE {
         return false;
     }
     let mut page = ptr & !0xfff;

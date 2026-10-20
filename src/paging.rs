@@ -4,6 +4,7 @@
 
 use crate::memory;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::{Mutex, NoPreempt};
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{
@@ -242,6 +243,67 @@ pub unsafe fn remap_kernel() {
     }
 
     Cr3::write(pml4_frame, Cr3Flags::empty());
+    KERNEL_CR3.store(pml4_frame.start_address().as_u64(), Ordering::SeqCst);
+}
+
+static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
+
+/// Physical address of the kernel's own PML4 (valid after `remap_kernel`).
+pub fn kernel_cr3() -> u64 {
+    KERNEL_CR3.load(Ordering::SeqCst)
+}
+
+/// Makes `pml4` (physical address) the active top-level page table.
+pub fn switch_to(pml4: u64) {
+    use x86_64::registers::control::Cr3Flags;
+    if Cr3::read().0.start_address().as_u64() != pml4 {
+        unsafe { Cr3::write(PhysFrame::containing_address(PhysAddr::new(pml4)), Cr3Flags::empty()) };
+    }
+}
+
+/// Creates a page table for a user process: a fresh PML4 that shares every
+/// kernel mapping (the kernel lives entirely under PML4 entry 0, so the
+/// lower-level tables are shared too) and has no user mappings yet.
+pub fn new_user_space() -> u64 {
+    let _np = NoPreempt::new();
+    let frame = KernelFrames.allocate_frame().expect("user pml4 frame");
+    let src = unsafe { &*(kernel_cr3() as *const PageTable) };
+    let dst = unsafe { &mut *(frame.start_address().as_u64() as *mut PageTable) };
+    for i in 0..512 {
+        dst[i] = src[i].clone();
+    }
+    frame.start_address().as_u64()
+}
+
+/// Frees a user page-table tree: every table and mapped frame reachable from
+/// PML4 entries 1..512, then the PML4 itself. The kernel PML4 must be active.
+pub fn destroy_user_space(pml4: u64) {
+    let _np = NoPreempt::new();
+    assert_eq!(Cr3::read().0.start_address().as_u64(), kernel_cr3(), "destroy with kernel cr3");
+    unsafe fn free_tree(phys: u64, level: u8) {
+        let table = &*(phys as *const PageTable);
+        for e in table.iter() {
+            if !e.flags().contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            let child = e.addr().as_u64();
+            if level > 1 && !e.flags().contains(PageTableFlags::HUGE_PAGE) {
+                free_tree(child, level - 1);
+            } else {
+                KernelFrames.deallocate_frame(PhysFrame::containing_address(PhysAddr::new(child)));
+            }
+        }
+        KernelFrames.deallocate_frame(PhysFrame::containing_address(PhysAddr::new(phys)));
+    }
+    unsafe {
+        let top = &*(pml4 as *const PageTable);
+        for i in 1..512 {
+            if top[i].flags().contains(PageTableFlags::PRESENT) {
+                free_tree(top[i].addr().as_u64(), 3);
+            }
+        }
+        KernelFrames.deallocate_frame(PhysFrame::containing_address(PhysAddr::new(pml4)));
+    }
 }
 
 /// Virtual → physical translation using the live page tables.
