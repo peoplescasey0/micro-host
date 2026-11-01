@@ -210,3 +210,7 @@ Like a postcard, this OS is:
 ---
 
 **Status**: Core foundation complete. Ready for memory paging and process management implementation.
+
+## License
+
+Copyright (c) 2026 peoplescasey0. All rights reserved. See [LICENSE](LICENSE).
