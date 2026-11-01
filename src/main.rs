@@ -14,6 +14,7 @@ mod keyboard;
 mod memory;
 mod paging;
 mod pic;
+mod ramdisk;
 mod sched;
 mod shell;
 mod sync;

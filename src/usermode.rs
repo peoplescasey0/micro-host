@@ -27,10 +27,12 @@ use x86_64::VirtAddr;
 
 pub const USER_BASE: u64 = 0x80_0000_0000; // PML4 entry 1 (entry 0 = kernel)
 const REGION_SIZE: u64 = 1 << 20;
-const CODE_OFFSET: u64 = 0;
 const STACK_GUARD_OFFSET: u64 = 0x7_0000; // unmapped
 const STACK_PAGES: u64 = 4;
 const STACK_TOP_OFFSET: u64 = STACK_GUARD_OFFSET + 4096 + STACK_PAGES * 4096;
+const ELF_PT_LOAD: u32 = 1;
+const ELF_PF_X: u32 = 1;
+const ELF_PF_W: u32 = 2;
 
 pub const SYS_WRITE: u64 = 0;
 pub const SYS_EXIT: u64 = 1;
@@ -43,6 +45,27 @@ pub static KILLED: AtomicUsize = AtomicUsize::new(0);
 
 static EXITS: Mutex<Vec<(u64, i64)>> = Mutex::new(Vec::new()); // (task id, exit code)
 static PROCS: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new()); // (task id, pml4)
+
+fn program(name: &str) -> &'static [u8] {
+    crate::ramdisk::find(name)
+        .unwrap_or_else(|| panic!("user program missing from ramdisk: {}", name))
+}
+
+pub fn prog_hello() -> &'static [u8] {
+    program("hello")
+}
+
+pub fn prog_evil() -> &'static [u8] {
+    program("evil")
+}
+
+pub fn prog_poke() -> &'static [u8] {
+    program("poke")
+}
+
+pub fn prog_peek() -> &'static [u8] {
+    program("peek")
+}
 
 /// Exit code recorded by `exit` for the given task id, if it has exited.
 pub fn exit_code(task: u64) -> Option<i64> {
@@ -74,127 +97,8 @@ global_asm!(
     "   sysretq",
 );
 
-// Tiny user programs, position independent, placed in .rodata and copied
-// into user pages at spawn time.
-global_asm!(
-    ".section .rodata.user,\"a\"",
-    ".global user_hello_start",
-    ".global user_hello_end",
-    "user_hello_start:",
-    "   mov r12d, 3",
-    ".Lhello_loop:",
-    "   xor eax, eax",
-    "   lea rdi, [rip + .Lhello_msg]",
-    "   mov esi, 19",
-    "   syscall",
-    "   mov eax, 3",
-    "   mov edi, 20",
-    "   syscall",
-    "   dec r12d",
-    "   jnz .Lhello_loop",
-    "   mov eax, 1",
-    "   mov edi, 42",
-    "   syscall",
-    ".Lhello_msg:",
-    "   .ascii \"hello from ring 3!\\n\"",
-    "user_hello_end:",
-    ".global user_evil_start",
-    ".global user_evil_end",
-    "user_evil_start:",
-    "   xor eax, eax",
-    "   mov edi, 0x100000",
-    "   mov esi, 16",
-    "   syscall",
-    "   cmp rax, -1",
-    "   jne .Levil_bad",
-    "   xor eax, eax",
-    "   lea rdi, [rip + .Levil_msg]",
-    "   mov esi, 49",
-    "   syscall",
-    "   mov rax, qword ptr [0x100000]",
-    ".Levil_bad:",
-    "   mov eax, 1",
-    "   mov edi, 1",
-    "   syscall",
-    ".Levil_msg:",
-    "   .ascii \"bad pointer rejected; now touching kernel memory\\n\"",
-    "user_evil_end:",
-    // Writes a marker to the top of its stack, sleeps, checks it survived.
-    ".global user_poke_start",
-    ".global user_poke_end",
-    "user_poke_start:",
-    "   lea rbx, [rsp - 8]",
-    "   movabs r12, 0x1122334455667788",
-    "   mov [rbx], r12",
-    "   mov eax, 3",
-    "   mov edi, 50",
-    "   syscall",
-    "   cmp [rbx], r12",
-    "   mov edi, 7",
-    "   je .Lpoke_done",
-    "   mov edi, 99",
-    ".Lpoke_done:",
-    "   mov eax, 1",
-    "   syscall",
-    "user_poke_end:",
-    // Reads the same virtual address while poke sleeps: must see zero.
-    ".global user_peek_start",
-    ".global user_peek_end",
-    "user_peek_start:",
-    "   lea rbx, [rsp - 8]",
-    "   mov eax, 3",
-    "   mov edi, 10",
-    "   syscall",
-    "   mov rax, [rbx]",
-    "   test rax, rax",
-    "   mov edi, 5",
-    "   jz .Lpeek_done",
-    "   mov edi, 66",
-    ".Lpeek_done:",
-    "   mov eax, 1",
-    "   syscall",
-    "user_peek_end:",
-    ".section .text",
-);
-
 extern "C" {
     fn syscall_entry();
-    static user_hello_start: u8;
-    static user_hello_end: u8;
-    static user_evil_start: u8;
-    static user_evil_end: u8;
-    static user_poke_start: u8;
-    static user_poke_end: u8;
-    static user_peek_start: u8;
-    static user_peek_end: u8;
-}
-
-fn slice(start: &'static u8, end: &'static u8) -> &'static [u8] {
-    let s = start as *const u8 as usize;
-    let e = end as *const u8 as usize;
-    unsafe { core::slice::from_raw_parts(s as *const u8, e - s) }
-}
-
-/// Writes a marker to its stack, sleeps 50 ticks, exits 7 if it is intact.
-pub fn prog_poke() -> &'static [u8] {
-    unsafe { slice(&user_poke_start, &user_poke_end) }
-}
-
-/// Reads poke's marker address from another address space: exits 5 if it
-/// sees zero (isolated), 66 if it sees poke's data.
-pub fn prog_peek() -> &'static [u8] {
-    unsafe { slice(&user_peek_start, &user_peek_end) }
-}
-
-/// Prints three times, sleeping between, then exits with code 42.
-pub fn prog_hello() -> &'static [u8] {
-    unsafe { slice(&user_hello_start, &user_hello_end) }
-}
-
-/// Passes a kernel pointer to `write` (must be rejected), then reads kernel
-/// memory directly (must fault and get the process killed).
-pub fn prog_evil() -> &'static [u8] {
-    unsafe { slice(&user_evil_start, &user_evil_end) }
 }
 
 /// Enables `syscall`/`sysret`. Requires gdt::init and a working heap.
@@ -213,11 +117,140 @@ fn is_user_task() -> bool {
     PROCS.lock().iter().any(|p| p.0 == id)
 }
 
-/// Spawns a user process running the machine code in `code` (at most 4 KiB,
-/// position independent, entered at offset 0). Returns the task id.
+/// Spawns a user process from a static x86-64 ELF executable. Returns the task id.
 pub fn spawn(name: &'static str, code: &'static [u8]) -> u64 {
-    assert!(code.len() <= 4096);
     sched::spawn(name, move || run(code))
+}
+
+fn elf_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    let raw: [u8; 2] = bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
+    Some(u16::from_le_bytes(raw))
+}
+
+fn elf_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    let raw: [u8; 4] = bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
+    Some(u32::from_le_bytes(raw))
+}
+
+fn elf_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+    let raw: [u8; 8] = bytes.get(offset..offset.checked_add(8)?)?.try_into().ok()?;
+    Some(u64::from_le_bytes(raw))
+}
+
+fn load_elf(code: &[u8]) -> u64 {
+    assert!(
+        code.starts_with(b"\x7fELF\x02\x01\x01"),
+        "invalid x86-64 ELF header"
+    );
+    assert_eq!(elf_u16(code, 16), Some(2), "user ELF must be executable");
+    assert_eq!(elf_u16(code, 18), Some(62), "user ELF must target x86-64");
+    assert_eq!(elf_u16(code, 52), Some(64), "unsupported ELF header size");
+
+    let entry = elf_u64(code, 24).expect("truncated ELF entry point");
+    let phoff = usize::try_from(elf_u64(code, 32).expect("truncated ELF program headers"))
+        .expect("ELF program header offset does not fit usize");
+    let phentsize = elf_u16(code, 54).expect("truncated ELF program header size") as usize;
+    let phnum = elf_u16(code, 56).expect("truncated ELF program header count") as usize;
+    assert!(phentsize >= 56, "unsupported ELF program header size");
+    assert!(
+        phoff
+            .checked_add(
+                phentsize
+                    .checked_mul(phnum)
+                    .expect("ELF header table overflow"),
+            )
+            .is_some_and(|end| end <= code.len()),
+        "truncated ELF program header table"
+    );
+
+    let mut entry_is_executable = false;
+    for i in 0..phnum {
+        let header = phoff + i * phentsize;
+        if elf_u32(code, header) != Some(ELF_PT_LOAD) {
+            continue;
+        }
+
+        let flags = elf_u32(code, header + 4).expect("truncated ELF segment flags");
+        let offset =
+            usize::try_from(elf_u64(code, header + 8).expect("truncated ELF segment offset"))
+                .expect("ELF segment offset does not fit usize");
+        let address = elf_u64(code, header + 16).expect("truncated ELF segment address");
+        let file_size =
+            usize::try_from(elf_u64(code, header + 32).expect("truncated ELF file size"))
+                .expect("ELF file size does not fit usize");
+        let memory_size =
+            usize::try_from(elf_u64(code, header + 40).expect("truncated ELF memory size"))
+                .expect("ELF memory size does not fit usize");
+        assert!(file_size <= memory_size, "ELF segment file size exceeds memory size");
+        assert!(
+            offset.checked_add(file_size).is_some_and(|end| end <= code.len()),
+            "ELF segment extends past its file"
+        );
+
+        let end = address
+            .checked_add(memory_size as u64)
+            .expect("ELF segment address overflow");
+        assert!(
+            address >= USER_BASE && end <= USER_BASE + STACK_GUARD_OFFSET,
+            "ELF segment is outside the user program region"
+        );
+        if memory_size == 0 {
+            continue;
+        }
+        if flags & ELF_PF_X != 0 && entry >= address && entry < end {
+            entry_is_executable = true;
+        }
+
+        let mut page_flags = PageTableFlags::USER_ACCESSIBLE;
+        if flags & ELF_PF_W != 0 {
+            page_flags |= PageTableFlags::WRITABLE;
+        }
+        if flags & ELF_PF_X == 0 {
+            page_flags |= PageTableFlags::NO_EXECUTE;
+        }
+
+        let page_start = address & !0xfff;
+        let page_end = end.checked_add(0xfff).expect("ELF page range overflow") & !0xfff;
+        let mut page = page_start;
+        while page < page_end {
+            paging::map_new_page(
+                page,
+                PageTableFlags::USER_ACCESSIBLE
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::NO_EXECUTE,
+            )
+            .expect("map user ELF segment");
+            page += 4096;
+        }
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                code.as_ptr().add(offset),
+                address as *mut u8,
+                file_size,
+            );
+            core::ptr::write_bytes(
+                (address + file_size as u64) as *mut u8,
+                0,
+                memory_size - file_size,
+            );
+        }
+
+        page = page_start;
+        while page < page_end {
+            assert!(
+                paging::set_page_flags(page, page_flags),
+                "set user ELF page permissions"
+            );
+            page += 4096;
+        }
+    }
+
+    assert!(
+        entry_is_executable,
+        "ELF entry point is not in an executable segment"
+    );
+    entry
 }
 
 fn run(code: &'static [u8]) -> ! {
@@ -226,13 +259,9 @@ fn run(code: &'static [u8]) -> ! {
     PROCS.lock().push((sched::current_id(), pml4));
     sched::set_current_cr3(pml4); // from here on we run in our own address space
 
-    let user = PageTableFlags::USER_ACCESSIBLE;
-    let code_va = base + CODE_OFFSET;
-    paging::map_new_page(code_va, PageTableFlags::WRITABLE | user).expect("map user code");
-    unsafe { core::ptr::copy_nonoverlapping(code.as_ptr(), code_va as *mut u8, code.len()) };
-    // Final permissions: read + execute, not writable.
-    assert!(paging::set_page_flags(code_va, user));
+    let code_va = load_elf(code);
 
+    let user = PageTableFlags::USER_ACCESSIBLE;
     let stack_base = base + STACK_GUARD_OFFSET + 4096;
     for i in 0..STACK_PAGES {
         paging::map_new_page(

@@ -1,0 +1,23 @@
+[package]
+name = "postcard-minimal-kernel"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "postcard-minimal-kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+# MINIMAL dependencies - only what we absolutely need
+[dependencies]
+uart_16550 = "0.2"
+spin = "0.9"
+x86_64 = { version = "0.15", default-features = false, features = ["instructions", "abi_x86_interrupt"] }
+linked_list_allocator = "0.10"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

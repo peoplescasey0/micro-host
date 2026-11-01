@@ -1,0 +1,26 @@
+﻿# Build output
+target/
+temp-build/
+*.exe
+*.pdb
+*.iso
+# Dependencies
+node_modules/
+dist/
+# VM images and runtime data
+*.qcow2
+*.vmdk
+*.vdi
+data/
+# Editor / tool state
+.vs/
+.vscode/
+.snapshots/
+.ai-undo/
+# Secrets
+.env
+.env.*
+
+# Third-party integrations (fetch separately)
+integrations/*
+!integrations/README.md
